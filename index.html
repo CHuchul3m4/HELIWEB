@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HELIBOT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&display=swap" rel="stylesheet">
+<style>
+  :root { --texto: #fff; --oliva: #5e5604; --claro: #e9e3b0; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: #000; }
+  body {
+    display: grid; place-items: center; padding: 12px;
+    font-family: "Patrick Hand", "Segoe Print", "Ink Free", "Bradley Hand", cursive;
+    color: var(--texto);
+  }
+  .app { width: min(100%, 640px); }
+
+  /* ---- Pantalla CRT ---- */
+  #pantalla {
+    position: relative; width: 100%; aspect-ratio: 4 / 3;
+    background: #000; overflow: hidden; container-type: inline-size;
+    animation: parpadeo 5s infinite;
+  }
+  #pantalla > * { position: absolute; z-index: 1; }
+  /* líneas de barrido + viñeta */
+  #pantalla::after {
+    content: ""; position: absolute; inset: 0; z-index: 3; pointer-events: none;
+    background:
+      repeating-linear-gradient(to bottom, transparent 0 2px, rgba(0,0,0,.4) 2px 4px),
+      radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.65) 100%);
+  }
+  /* banda de luz que baja lentamente */
+  #pantalla::before {
+    content: ""; position: absolute; left: 0; right: 0; top: -20%; height: 18%;
+    z-index: 2; pointer-events: none;
+    background: linear-gradient(to bottom, transparent, rgba(255,255,200,.07), transparent);
+    animation: barrido 6s linear infinite;
+  }
+  @keyframes barrido { to { top: 110%; } }
+  @keyframes parpadeo {
+    0%, 100% { opacity: 1; }
+    4% { opacity: .86; }  6% { opacity: 1; }
+    38% { opacity: .95; }
+    40% { opacity: .8; transform: translateX(1px); }
+    41% { opacity: 1; transform: none; }
+    72% { opacity: .92; } 74% { opacity: 1; }
+  }
+
+  #cara {
+    left: 50%; top: 50%; height: 94%; aspect-ratio: 1;
+    transform: translate(-50%, -50%);
+    image-rendering: pixelated;
+    filter: drop-shadow(0 0 7px rgba(130, 118, 0, .6));
+  }
+  #sub {
+    left: 5%; right: 5%; bottom: 5%; margin: 0;
+    font-size: 4.6cqw; line-height: 1.15;
+    text-transform: uppercase; letter-spacing: .04em;
+    text-shadow: 0 0 3px #000, 0 0 8px rgba(255,255,255,.35);
+  }
+
+  /* ---- Controles ---- */
+  form { display: none; gap: 8px; margin-top: 14px; }
+  .encendido form { display: flex; }
+  input, button {
+    font: inherit; font-size: 20px; border-radius: 0; padding: 8px 12px;
+    border: 1px solid var(--oliva);
+  }
+  input { flex: 1; min-width: 0; background: #000; color: var(--claro); }
+  button { background: var(--oliva); color: #fff; cursor: pointer; }
+  button:active { transform: translateY(2px); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--claro); outline-offset: 2px; }
+  #encender { left: 50%; bottom: 8%; transform: translateX(-50%); padding: 10px 26px; z-index: 4; }
+  #encender:active { transform: translateX(-50%) translateY(2px); }
+  .encendido #encender { display: none; }
+  #links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  #links a { color: var(--claro); border: 1px solid var(--oliva); padding: 6px 12px; text-decoration: none; font-size: 18px; }
+  #links a:hover, #links a:focus-visible { background: var(--oliva); color: #fff; outline: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #pantalla, #pantalla::before { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <main class="app" id="app">
+    <div id="pantalla">
+      <canvas id="cara" width="48" height="48" aria-hidden="true"></canvas>
+      <p id="sub" role="status" aria-live="polite"></p>
+      <button id="encender" type="button">Encender</button>
+    </div>
+    <form id="form">
+      <input id="msg" autocomplete="off" placeholder="Escríbeme algo" aria-label="Tu mensaje">
+      <button type="submit">Enviar</button>
+    </form>
+    <nav id="links" aria-label="Enlaces"></nav>
+  </main>
+
+<script type="module">
+  import { intro, respuestas, porDefecto } from "./respuestas.mjs";
+
+  const EFECTO_JUGUETE = true; // false = voz sin filtro de bocina
+  const $ = (id) => document.getElementById(id);
+  const g = $("cara").getContext("2d");
+  const sub = $("sub");
+  const msg = $("msg");
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const reducido = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ---- Cara pixelada (rejilla de 48x48 que el CSS amplía) ----
+  const COL = { cara: "#5e5604", anillo: "#433b03", rasgo: "#2a2102" };
+  let boca = 0;      // 0 = V cerrada, 1 y 2 = abierta
+  let ojos = true;   // false = parpadeo
+
+  function dibujar() {
+    g.clearRect(0, 0, 48, 48);
+    for (let y = 0; y < 48; y++) {
+      for (let x = 0; x < 48; x++) {
+        const d = Math.hypot(x + .5 - 24, y + .5 - 24);
+        if (d <= 21) { g.fillStyle = d > 19.2 ? COL.anillo : COL.cara; g.fillRect(x, y, 1, 1); }
+      }
+    }
+    g.fillStyle = COL.rasgo;
+    const y0 = ojos ? 15 : 21, alto = ojos ? 14 : 2;
+    g.fillRect(17, y0, 2, alto);
+    g.fillRect(29, y0, 2, alto);
+    if (boca === 0) {
+      for (let k = 0; k < 6; k++) { g.fillRect(23 - k, 39 - k, 1, 1); g.fillRect(24 + k, 39 - k, 1, 1); }
+    } else {
+      const h = boca === 1 ? 5 : 7, base = boca === 1 ? 39 : 41;
+      for (let k = 0; k < h; k++) g.fillRect(23 - k, base - k, 2 + 2 * k, 1);
+    }
+    sombrero();
+  }
+
+  // Gorrito de aniversario: cono a rayas, ligeramente inclinado, con pompón.
+  function sombrero() {
+    const ROJO = "#b3341f", CREMA = "#f1e7a6", BORDE = "#7d1f10";
+    for (let y = 2; y <= 9; y++) {
+      const w = 2 + Math.round((y - 2) * 1.5);
+      const cx = 24 + (10 - y) * 0.35;
+      const x0 = Math.round(cx - w / 2);
+      for (let x = x0; x < x0 + w; x++) {
+        g.fillStyle = (x + y) % 4 < 2 ? ROJO : CREMA;
+        g.fillRect(x, y, 1, 1);
+      }
+    }
+    g.fillStyle = BORDE;
+    g.fillRect(16, 10, 16, 1);
+    g.fillStyle = CREMA;
+    g.fillRect(26, 0, 2, 2);
+  }
+
+  let timer = null;
+  function hablando(on) {
+    clearInterval(timer);
+    if (!on) { boca = 0; dibujar(); return; }
+    if (reducido) { boca = 1; dibujar(); return; }
+    timer = setInterval(() => {
+      boca = boca === 0 ? 1 + Math.round(Math.random()) : 0;
+      dibujar();
+    }, 140);
+  }
+
+  if (!reducido) {
+    setInterval(() => {
+      ojos = false; dibujar();
+      setTimeout(() => { ojos = true; dibujar(); }, 130);
+    }, 4000);
+  }
+  dibujar();
+
+  // ---- Lógica del bot ----
+  const limpiar = (s) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ").trim();
+  const contiene = (t, c) => (" " + t + " ").includes(" " + limpiar(c) + " ");
+  const elegir = (l) => l[Math.floor(Math.random() * l.length)];
+  const pausa = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function buscar(entrada) {
+    const t = limpiar(entrada);
+    const exactas = respuestas.filter((r) => r.exactas?.some((c) => t === limpiar(c)));
+    if (exactas.length) return elegir(exactas);
+    const m = respuestas.filter((r) => r.claves?.some((c) => contiene(t, c)));
+    return m.length ? elegir(m) : elegir(porDefecto);
+  }
+
+  let turno = 0;     // sube cada vez que hay una respuesta nueva (cancela la anterior)
+  let fuente = null;
+
+  // Reproduce un .wav y resuelve al terminar. Devuelve false si no hay audio.
+  async function reproducir(url) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return false;
+      const buf = await ctx.decodeAudioData(await res.arrayBuffer());
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      let salida = src;
+      if (EFECTO_JUGUETE) {
+        const filtro = ctx.createBiquadFilter();
+        filtro.type = "bandpass"; filtro.frequency.value = 1800; filtro.Q.value = 0.7;
+        const ganancia = ctx.createGain();
+        ganancia.gain.value = 2.2;
+        src.connect(filtro).connect(ganancia);
+        salida = ganancia;
+      }
+      salida.connect(ctx.destination);
+      fuente = src;
+      await new Promise((fin) => { src.onended = fin; src.start(); });
+      return true;
+    } catch { return false; }
+  }
+
+  function mostrarLinks(ls) {
+    $("links").replaceChildren(...ls.map((l) => {
+      const a = document.createElement("a");
+      a.href = l.url; a.textContent = "♪ " + l.titulo;
+      a.target = "_blank"; a.rel = "noopener";
+      return a;
+    }));
+  }
+
+  async function decir(r) {
+    const mi = ++turno;
+    fuente?.stop();
+    $("links").replaceChildren();
+    const partes = r.partes ?? [{ texto: r.texto }];
+    for (let i = 0; i < partes.length; i++) {
+      if (mi !== turno) return;
+      sub.textContent = partes[i].texto;
+      hablando(true);
+      const ok = await reproducir(r.partes ? `audio/${r.id}_${i + 1}.wav` : `audio/${r.id}.wav`);
+      if (mi !== turno) return;
+      hablando(false);
+      // Sin audio: deja leer el subtítulo un rato.
+      await pausa(ok ? 250 : Math.min(6000, 1500 + partes[i].texto.length * 45));
+    }
+    if (mi === turno && r.links) mostrarLinks(r.links);
+  }
+
+  $("encender").onclick = async () => {
+    await ctx.resume(); // el navegador exige un clic antes de dar audio
+    $("app").classList.add("encendido");
+    decir(intro);
+    msg.focus();
+  };
+
+  $("form").onsubmit = (e) => {
+    e.preventDefault();
+    const texto = msg.value.trim();
+    if (!texto) return;
+    msg.value = "";
+    decir(buscar(texto));
+  };
+</script>
+</body>
+</html>
